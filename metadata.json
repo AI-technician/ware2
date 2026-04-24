@@ -1,0 +1,6 @@
+{
+  "name": "남양주시 물류창고 대시보드",
+  "description": "엑셀 파일을 업로드하여 남양주시 물류창고 현황을 시각화하는 대시보드입니다.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
