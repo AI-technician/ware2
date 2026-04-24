@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback, useEffect } from 'react';
 import * as XLSX from 'xlsx';
 import { 
   UploadCloud, 
@@ -10,7 +10,8 @@ import {
   Search,
   FileSpreadsheet,
   Trash2,
-  Filter
+  Filter,
+  X
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -37,7 +38,44 @@ export default function App() {
   // Filters
   const [selectedRegions, setSelectedRegions] = useState<Set<string>>(new Set());
   const [searchTerm, setSearchTerm] = useState('');
-  
+  const [selectedFacility, setSelectedFacility] = useState<any>(null);
+
+  const loadDataFromWorkbook = (wb: XLSX.WorkBook) => {
+    const wsname = wb.SheetNames[0];
+    const ws = wb.Sheets[wsname];
+    const parsedData = XLSX.utils.sheet_to_json(ws);
+    
+    if (parsedData.length > 0) {
+      const cols = Object.keys(parsedData[0] as object);
+      setColumns(cols);
+      setData(parsedData);
+      
+      const findCol = (keywords: string[]) => 
+        cols.find(c => keywords.some(k => c.toLowerCase().includes(k))) || cols[0];
+        
+      setNameCol(findCol(['상호', '창고명', '시설', '기업', '건축주', '이름', '명칭']));
+      setLocationCol(findCol(['소재지', '주소', '위치']));
+      setAreaCol(findCol(['면적', '연면적', '대지면적', '규모', '크기']));
+      setUrlCol(findCol(['토지정보주소', 'url', '링크', '웹사이트']) || '');
+      setRegionCol(findCol(['지역구분', '권역', '행정동']) || '');
+    }
+  };
+
+  useEffect(() => {
+    fetch('/data.csv')
+      .then(response => {
+        if (!response.ok) throw new Error('File not found');
+        return response.arrayBuffer();
+      })
+      .then(ab => {
+        const wb = XLSX.read(ab, { type: 'array' });
+        loadDataFromWorkbook(wb);
+      })
+      .catch(error => {
+        console.error("Failed to load default data.csv", error);
+      });
+  }, []);
+
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -46,25 +84,7 @@ export default function App() {
     reader.onload = (event) => {
       const bstr = event.target?.result;
       const wb = XLSX.read(bstr, { type: 'binary' });
-      const wsname = wb.SheetNames[0];
-      const ws = wb.Sheets[wsname];
-      const parsedData = XLSX.utils.sheet_to_json(ws);
-      
-      if (parsedData.length > 0) {
-        const cols = Object.keys(parsedData[0] as object);
-        setColumns(cols);
-        setData(parsedData);
-        
-        // Auto-detect columns
-        const findCol = (keywords: string[]) => 
-          cols.find(c => keywords.some(k => c.toLowerCase().includes(k))) || cols[0];
-          
-        setNameCol(findCol(['상호', '창고명', '시설', '기업', '건축주', '이름', '명칭']));
-        setLocationCol(findCol(['소재지', '주소', '위치']));
-        setAreaCol(findCol(['면적', '연면적', '대지면적', '규모', '크기']));
-        setUrlCol(findCol(['토지정보주소', 'url', '링크', '웹사이트']) || '');
-        setRegionCol(findCol(['지역구분', '권역', '행정동']) || '');
-      }
+      loadDataFromWorkbook(wb);
     };
     reader.readAsBinaryString(file);
   };
@@ -84,24 +104,7 @@ export default function App() {
     reader.onload = (event) => {
       const bstr = event.target?.result;
       const wb = XLSX.read(bstr, { type: 'binary' });
-      const wsname = wb.SheetNames[0];
-      const ws = wb.Sheets[wsname];
-      const parsedData = XLSX.utils.sheet_to_json(ws);
-      
-      if (parsedData.length > 0) {
-        const cols = Object.keys(parsedData[0] as object);
-        setColumns(cols);
-        setData(parsedData);
-        
-        const findCol = (keywords: string[]) => 
-          cols.find(c => keywords.some(k => c.toLowerCase().includes(k))) || cols[0];
-          
-        setNameCol(findCol(['상호', '창고명', '시설', '기업', '건축주', '이름', '명칭']));
-        setLocationCol(findCol(['소재지', '주소', '위치']));
-        setAreaCol(findCol(['면적', '연면적', '대지면적', '규모', '크기']));
-        setUrlCol(findCol(['토지정보주소', 'url', '링크', '웹사이트']) || '');
-        setRegionCol(findCol(['지역구분', '권역', '행정동']) || '');
-      }
+      loadDataFromWorkbook(wb);
     };
     reader.readAsBinaryString(file);
   };
@@ -175,8 +178,8 @@ export default function App() {
 
   const filteredData = useMemo(() => {
     return processedData.filter(item => {
-      const matchesSearch = item._name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                            item._rawLocation.toLowerCase().includes(searchTerm.toLowerCase());
+      const matchesSearch = String(item._name).toLowerCase().includes(searchTerm.toLowerCase()) || 
+                            String(item._rawLocation).toLowerCase().includes(searchTerm.toLowerCase());
       const matchesRegion = selectedRegions.size === 0 || selectedRegions.has(item._region);
       return matchesSearch && matchesRegion;
     });
@@ -492,10 +495,10 @@ export default function App() {
                   <tbody className="text-sm divide-y divide-slate-700/50">
                     {filteredData.length > 0 ? (
                       filteredData.map((row) => (
-                        <tr key={row._id} className="hover:bg-slate-700/30 transition-colors group">
+                        <tr key={row._id} onClick={() => setSelectedFacility(row)} className="hover:bg-slate-700/30 transition-colors group cursor-pointer">
                           <td className="py-3 px-4 font-medium text-slate-200">
                              {row._url ? (
-                               <a href={row._url} target="_blank" rel="noopener noreferrer" className="hover:text-blue-400 hover:underline transition-colors cursor-pointer">
+                               <a href={row._url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} className="hover:text-blue-400 hover:underline transition-colors cursor-pointer">
                                  {row._name}
                                </a>
                              ) : (
@@ -529,6 +532,52 @@ export default function App() {
           </div>
         </div>
       </main>
+
+      {/* Modal */}
+      {selectedFacility && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setSelectedFacility(null)}>
+          <div className="bg-slate-900 border border-slate-700 rounded-3xl w-full max-w-2xl max-h-[90vh] flex flex-col shadow-2xl relative overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="p-6 border-b border-slate-700/80 flex justify-between items-center bg-slate-800/50 shrink-0">
+              <h2 className="text-xl font-bold text-white tracking-tight flex items-center gap-2">
+                <Building2 className="w-5 h-5 text-blue-400" />
+                {selectedFacility._name}
+              </h2>
+              <button 
+                onClick={() => setSelectedFacility(null)}
+                className="text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-full p-2 transition-colors"
+                title="Close"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-6 overflow-y-auto custom-scrollbar flex-1 bg-slate-900/50">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {Object.entries(selectedFacility).map(([key, value]) => {
+                  if (key.startsWith('_')) return null; // Skip internal fields
+                  
+                  const strValue = String(value ?? '');
+                  if (!strValue || strValue === 'undefined' || strValue === 'null') return null;
+                  
+                  const isUrl = strValue.startsWith('http://') || strValue.startsWith('https://');
+                  
+                  return (
+                    <div key={key} className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-4 flex flex-col gap-1.5">
+                      <span className="text-[10px] uppercase tracking-wider font-bold text-slate-500">{key}</span>
+                      {isUrl ? (
+                        <a href={strValue} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 hover:underline text-sm font-medium truncate" title={strValue}>
+                          {strValue}
+                        </a>
+                      ) : (
+                        <span className="text-sm text-slate-200 font-medium break-words">{strValue}</span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
