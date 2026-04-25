@@ -68,6 +68,10 @@ export default function App() {
   // Map View Mode
   const [viewMode, setViewMode] = useState<'list' | 'map'>('list');
   const [coordinates, setCoordinates] = useState<Record<number, [number, number]>>({});
+  
+  // Loading state for default file
+  const [isInitializing, setIsInitializing] = useState(true);
+  const [initError, setInitError] = useState<string | null>(null);
 
   const getProceduralCoord = useCallback((address: string, id: number): [number, number] => {
     let hash = id;
@@ -144,17 +148,23 @@ export default function App() {
   };
 
   useEffect(() => {
-    fetch('/logistics.xlsx')
+    setIsInitializing(true);
+    setInitError(null);
+    const fileUrl = '/logistics.xlsx';
+    fetch(fileUrl)
       .then(response => {
-        if (!response.ok) throw new Error('File not found');
+        if (!response.ok) throw new Error('File not found: ' + response.statusText);
         return response.arrayBuffer();
       })
       .then(ab => {
-        const wb = XLSX.read(ab, { type: 'array' });
+        const wb = XLSX.read(new Uint8Array(ab), { type: 'array' });
         loadDataFromWorkbook(wb);
+        setIsInitializing(false);
       })
       .catch(error => {
         console.error("Failed to load default logistics.xlsx", error);
+        setInitError(error instanceof Error ? error.message : String(error));
+        setIsInitializing(false);
       });
   }, []);
 
@@ -283,10 +293,24 @@ export default function App() {
   const totalArea = filteredData.reduce((acc, curr) => acc + curr._area, 0);
 
   if (data.length === 0) {
+    if (isInitializing) {
+      return (
+        <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col items-center justify-center p-6 font-sans">
+          <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+          <p className="text-lg font-semibold text-slate-300">데이터를 불러오는 중입니다...</p>
+        </div>
+      );
+    }
+
     return (
       <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col items-center justify-center p-6 font-sans">
         <div className="max-w-2xl w-full bg-slate-800/50 border border-slate-700 rounded-3xl shadow-xl overflow-hidden">
           <div className="border-b border-slate-700 p-8 text-center">
+            {initError && (
+              <div className="mb-4 bg-red-400/10 border border-red-400/20 text-red-400 px-4 py-2 rounded-lg text-sm font-semibold max-w-md mx-auto">
+                기본 데이터 로드 실패: {initError}
+              </div>
+            )}
             <Building2 className="w-16 h-16 mx-auto mb-4 text-blue-400 opacity-80" />
             <h1 className="text-3xl font-bold tracking-tight">남양주시 물류창고 대시보드</h1>
             <p className="mt-2 text-slate-400 font-medium">관리하시는 엑셀 파일을 업로드하여 데이터를 시각화하세요</p>

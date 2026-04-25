@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head><title>Test</title></head>
+<body>
+<script src="https://unpkg.com/xlsx/dist/xlsx.full.min.js"></script>
+<script>
+fetch('https://raw.githubusercontent.com/AI-technician/ware2/477c2575e1749417fd119e74630cc9e3635e4df8/public/logistics.xlsx')
+  .then(r => r.arrayBuffer())
+  .then(ab => {
+    const wb = XLSX.read(new Uint8Array(ab), { type: 'array' });
+    console.log(wb.SheetNames);
+    console.log('SUCCESS');
+  })
+  .catch(e => {
+    console.error(e);
+  });
+</script>
+</body>
+</html>
