@@ -25,7 +25,7 @@ import {
   ResponsiveContainer,
   Cell
 } from 'recharts';
-import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, useMap, Tooltip as LeafletTooltip } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 
@@ -627,6 +627,12 @@ export default function App() {
                             position={coord}
                             eventHandlers={{ click: () => setSelectedFacility(row) }}
                           >
+                            <LeafletTooltip direction="top" offset={[0, -20]} opacity={1}>
+                              <div className="font-sans">
+                                <strong className="text-slate-800 block text-xs">{row._name}</strong>
+                                <span className="text-slate-500 text-[10px] block mt-0.5">{row._rawLocation}</span>
+                              </div>
+                            </LeafletTooltip>
                             <Popup className="custom-popup">
                               <div className="font-sans">
                                 <h4 className="font-bold text-slate-800 text-sm mb-1">{row._name}</h4>
