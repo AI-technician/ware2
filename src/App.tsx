@@ -11,7 +11,9 @@ import {
   FileSpreadsheet,
   Trash2,
   Filter,
-  X
+  X,
+  Map as MapIcon,
+  List
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -23,6 +25,29 @@ import {
   ResponsiveContainer,
   Cell
 } from 'recharts';
+import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
+import 'leaflet/dist/leaflet.css';
+import L from 'leaflet';
+
+// Fix leafet default marker icons in react
+delete (L.Icon.Default.prototype as any)._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
+  iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
+  shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png'
+});
+
+// Helper component to adjust map bounds
+function MapBounds({ markers }: { markers: [number, number][] }) {
+  const map = useMap();
+  useEffect(() => {
+    if (markers.length > 0) {
+      const bounds = L.latLngBounds(markers);
+      map.fitBounds(bounds, { padding: [50, 50], maxZoom: 14 });
+    }
+  }, [markers, map]);
+  return null;
+}
 
 export default function App() {
   const [data, setData] = useState<any[]>([]);
@@ -39,6 +64,61 @@ export default function App() {
   const [selectedRegions, setSelectedRegions] = useState<Set<string>>(new Set());
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedFacility, setSelectedFacility] = useState<any>(null);
+  
+  // Map View Mode
+  const [viewMode, setViewMode] = useState<'list' | 'map'>('list');
+  const [coordinates, setCoordinates] = useState<Record<number, [number, number]>>({});
+
+  const getProceduralCoord = useCallback((address: string, id: number): [number, number] => {
+    let hash = id;
+    for (let i = 0; i < address.length; i++) hash = address.charCodeAt(i) + ((hash << 5) - hash);
+    const latOffset = (hash % 100) / 3000;
+    const lonOffset = ((hash >> 3) % 100) / 3000;
+    return [37.6366 + latOffset, 127.2165 + lonOffset];
+  }, []);
+
+  const geocodeAddress = useCallback(async (address: string, id: number) => {
+    try {
+      const cleanAddr = address.split(',')[0].trim(); // Take main part
+      const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(cleanAddr)}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.length > 0) {
+          return [parseFloat(data[0].lat), parseFloat(data[0].lon)] as [number, number];
+        }
+      }
+    } catch (e) {
+      console.warn("Geocoding failed for", address);
+    }
+    return getProceduralCoord(address, id);
+  }, [getProceduralCoord]);
+
+  // Queue geocoding when data loads
+  useEffect(() => {
+    if (data.length === 0) return;
+    
+    let isMounted = true;
+    const loadCoords = async () => {
+      const newCoords = { ...coordinates };
+      for (let i = 0; i < data.length; i++) {
+        if (!isMounted) break;
+        const _id = i; // using index as _id from processedData
+        if (newCoords[_id]) continue; // already geocoded
+        
+        const address = data[i][locationCol] || '';
+        if (address) {
+          const coord = await geocodeAddress(address, _id);
+          newCoords[_id] = coord;
+          setCoordinates(prev => ({ ...prev, [_id]: coord }));
+          // Wait 1 second to respect Nominatim API rate limits
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+    };
+    loadCoords();
+    
+    return () => { isMounted = false; };
+  }, [data, locationCol]);
 
   const loadDataFromWorkbook = (wb: XLSX.WorkBook) => {
     const wsname = wb.SheetNames[0];
@@ -50,19 +130,21 @@ export default function App() {
       setColumns(cols);
       setData(parsedData);
       
-      const findCol = (keywords: string[]) => 
-        cols.find(c => keywords.some(k => c.toLowerCase().includes(k))) || cols[0];
+      const findCol = (keywords: string[], fallbackToFirst = false) => {
+        const found = cols.find(c => keywords.some(k => c.toLowerCase().includes(k)));
+        return found || (fallbackToFirst ? cols[0] : '');
+      };
         
-      setNameCol(findCol(['상호', '창고명', '시설', '기업', '건축주', '이름', '명칭']));
-      setLocationCol(findCol(['소재지', '주소', '위치']));
+      setNameCol(findCol(['상호', '창고명', '시설', '기업', '건축주', '이름', '명칭'], true));
+      setLocationCol(findCol(['소재지', '주소', '위치', '지번']));
       setAreaCol(findCol(['면적', '연면적', '대지면적', '규모', '크기']));
-      setUrlCol(findCol(['토지정보주소', 'url', '링크', '웹사이트']) || '');
-      setRegionCol(findCol(['지역구분', '권역', '행정동']) || '');
+      setUrlCol(findCol(['토지정보주소', 'url', '링크', '웹사이트']));
+      setRegionCol(findCol(['지역구분', '권역', '행정동', '지역']));
     }
   };
 
   useEffect(() => {
-    fetch('/data.csv')
+    fetch('/logistics.xlsx')
       .then(response => {
         if (!response.ok) throw new Error('File not found');
         return response.arrayBuffer();
@@ -72,7 +154,7 @@ export default function App() {
         loadDataFromWorkbook(wb);
       })
       .catch(error => {
-        console.error("Failed to load default data.csv", error);
+        console.error("Failed to load default logistics.xlsx", error);
       });
   }, []);
 
@@ -348,6 +430,7 @@ export default function App() {
                    className="bg-slate-900 border border-slate-700 rounded-md px-2 py-1 font-semibold focus:outline-none max-w-[140px] truncate text-slate-300 text-xs"
                    title={nameCol}
                 >
+                  <option value="">-- 선택 --</option>
                   {columns.map(c => <option key={c} value={c}>{c}</option>)}
                 </select>
               </div>
@@ -359,6 +442,7 @@ export default function App() {
                    className="bg-slate-900 border border-slate-700 rounded-md px-2 py-1 font-semibold focus:outline-none max-w-[140px] truncate text-slate-300 text-xs"
                    title={locationCol}
                 >
+                  <option value="">-- 선택 --</option>
                   {columns.map(c => <option key={c} value={c}>{c}</option>)}
                 </select>
               </div>
@@ -370,6 +454,7 @@ export default function App() {
                    className="bg-slate-900 border border-slate-700 rounded-md px-2 py-1 font-semibold focus:outline-none max-w-[140px] truncate text-slate-300 text-xs"
                    title={areaCol}
                 >
+                  <option value="">-- 선택 --</option>
                   {columns.map(c => <option key={c} value={c}>{c}</option>)}
                 </select>
               </div>
@@ -472,61 +557,112 @@ export default function App() {
               </div>
             </div>
 
-            {/* Data Table */}
+            {/* Data Table / Map */}
             <div className="xl:col-span-3 bg-slate-800/50 border border-slate-700 rounded-3xl p-6 overflow-hidden flex flex-col min-h-0">
-              <div className="flex justify-between items-center mb-4 shrink-0">
+              <div className="flex justify-between items-center mb-4 shrink-0 flex-wrap gap-2">
                 <div className="flex items-center space-x-2">
                   <TableProperties className="w-4 h-4 text-slate-500" />
-                  <h3 className="text-sm font-bold uppercase text-slate-500 tracking-wider">상세 현황표</h3>
+                  <h3 className="text-sm font-bold uppercase text-slate-500 tracking-wider">상세 현황</h3>
                 </div>
-                <span className="px-3 py-1 bg-slate-700 rounded text-[10px] font-bold tracking-widest text-emerald-400 border border-slate-600/50 shadow-inner uppercase">LIVE DATA</span>
+                <div className="flex items-center space-x-2">
+                  <div className="flex bg-slate-900 rounded-lg p-1 border border-slate-700">
+                    <button 
+                      onClick={() => setViewMode('list')}
+                      className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors flex items-center space-x-1.5 ${viewMode === 'list' ? 'bg-slate-700 text-white shadow-sm' : 'text-slate-400 hover:text-slate-300'}`}
+                    >
+                      <List className="w-3.5 h-3.5" />
+                      <span>목록</span>
+                    </button>
+                    <button 
+                      onClick={() => setViewMode('map')}
+                      className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors flex items-center space-x-1.5 ${viewMode === 'map' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-300'}`}
+                    >
+                      <MapIcon className="w-3.5 h-3.5" />
+                      <span>지도</span>
+                    </button>
+                  </div>
+                  <span className="px-3 py-1.5 bg-slate-700 rounded text-[10px] font-bold tracking-widest text-emerald-400 border border-slate-600/50 shadow-inner uppercase">LIVE DATA</span>
+                </div>
               </div>
               
-              <div className="overflow-auto flex-1 relative custom-scrollbar pr-2">
-                <table className="w-full text-left border-collapse min-w-max">
-                  <thead className="text-xs text-slate-500 border-b border-slate-700 uppercase sticky top-0 z-10 bg-slate-800/90 backdrop-blur">
-                    <tr>
-                      <th className="pb-3 px-4 font-semibold whitespace-nowrap">상호</th>
-                      <th className="pb-3 px-4 font-semibold whitespace-nowrap">지역</th>
-                      <th className="pb-3 px-4 font-semibold whitespace-nowrap">소재지</th>
-                      <th className="pb-3 px-4 font-semibold text-right whitespace-nowrap">면적 (㎡)</th>
-                    </tr>
-                  </thead>
-                  <tbody className="text-sm divide-y divide-slate-700/50">
-                    {filteredData.length > 0 ? (
-                      filteredData.map((row) => (
-                        <tr key={row._id} onClick={() => setSelectedFacility(row)} className="hover:bg-slate-700/30 transition-colors group cursor-pointer">
-                          <td className="py-3 px-4 font-medium text-slate-200">
-                             {row._url ? (
-                               <a href={row._url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} className="hover:text-blue-400 hover:underline transition-colors cursor-pointer">
-                                 {row._name}
-                               </a>
-                             ) : (
-                               row._name
-                             )}
-                          </td>
-                          <td className="py-3 px-4">
-                            <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-slate-700/80 text-[11px] font-bold text-slate-300 border border-slate-600">
-                              {row._region}
-                            </span>
-                          </td>
-                          <td className="py-3 px-4 text-slate-400 text-xs max-w-[200px] truncate group-hover:text-slate-300 transition-colors" title={row._rawLocation}>
-                            {row._rawLocation}
-                          </td>
-                          <td className="py-3 px-4 text-slate-300 font-mono text-right tabular-nums">
-                            {row._area ? row._area.toLocaleString(undefined, {maximumFractionDigits: 1}) : '-'}
+              <div className="overflow-auto flex-1 relative custom-scrollbar pr-2 flex flex-col rounded-xl">
+                {viewMode === 'map' ? (
+                  <div className="w-full h-full min-h-[400px] bg-slate-900 rounded-xl overflow-hidden border border-slate-700 z-10">
+                    <MapContainer center={[37.6366, 127.2165]} zoom={11} style={{ height: '100%', width: '100%' }}>
+                      <TileLayer
+                        attribution='&amp;copy <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+                        url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                      />
+                      <MapBounds markers={filteredData.filter(d => coordinates[d._id]).map(d => coordinates[d._id])} />
+                      {filteredData.map(row => {
+                        const coord = coordinates[row._id];
+                        if (!coord) return null;
+                        return (
+                          <Marker 
+                            key={row._id} 
+                            position={coord}
+                            eventHandlers={{ click: () => setSelectedFacility(row) }}
+                          >
+                            <Popup className="custom-popup">
+                              <div className="font-sans">
+                                <h4 className="font-bold text-slate-800 text-sm mb-1">{row._name}</h4>
+                                <p className="text-xs text-slate-500 mb-2">{row._rawLocation}</p>
+                                <div className="text-xs font-mono text-blue-600 font-bold bg-blue-50 py-1 px-2 rounded inline-block">
+                                  면적: {row._area ? row._area.toLocaleString(undefined, {maximumFractionDigits: 1}) : '-'} ㎡
+                                </div>
+                              </div>
+                            </Popup>
+                          </Marker>
+                        );
+                      })}
+                    </MapContainer>
+                  </div>
+                ) : (
+                  <table className="w-full text-left border-collapse min-w-max">
+                    <thead className="text-xs text-slate-500 border-b border-slate-700 uppercase sticky top-0 z-10 bg-slate-800/90 backdrop-blur">
+                      <tr>
+                        <th className="pb-3 px-4 font-semibold whitespace-nowrap">상호</th>
+                        <th className="pb-3 px-4 font-semibold whitespace-nowrap">지역</th>
+                        <th className="pb-3 px-4 font-semibold whitespace-nowrap">소재지</th>
+                        <th className="pb-3 px-4 font-semibold text-right whitespace-nowrap">면적 (㎡)</th>
+                      </tr>
+                    </thead>
+                    <tbody className="text-sm divide-y divide-slate-700/50">
+                      {filteredData.length > 0 ? (
+                        filteredData.map((row) => (
+                          <tr key={row._id} onClick={() => setSelectedFacility(row)} className="hover:bg-slate-700/30 transition-colors group cursor-pointer">
+                            <td className="py-3 px-4 font-medium text-slate-200">
+                               {row._url ? (
+                                 <a href={row._url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} className="hover:text-blue-400 hover:underline transition-colors cursor-pointer">
+                                   {row._name}
+                                 </a>
+                               ) : (
+                                 row._name
+                               )}
+                            </td>
+                            <td className="py-3 px-4">
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-slate-700/80 text-[11px] font-bold text-slate-300 border border-slate-600">
+                                {row._region}
+                              </span>
+                            </td>
+                            <td className="py-3 px-4 text-slate-400 text-xs max-w-[200px] truncate group-hover:text-slate-300 transition-colors" title={row._rawLocation}>
+                              {row._rawLocation}
+                            </td>
+                            <td className="py-3 px-4 text-slate-300 font-mono text-right tabular-nums">
+                              {row._area ? row._area.toLocaleString(undefined, {maximumFractionDigits: 1}) : '-'}
+                            </td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td colSpan={4} className="py-12 text-center text-slate-500 text-sm">
+                            조건에 맞는 데이터가 없습니다.
                           </td>
                         </tr>
-                      ))
-                    ) : (
-                      <tr>
-                        <td colSpan={4} className="py-12 text-center text-slate-500 text-sm">
-                          조건에 맞는 데이터가 없습니다.
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
+                      )}
+                    </tbody>
+                  </table>
+                )}
               </div>
             </div>
           </div>
@@ -555,8 +691,25 @@ export default function App() {
                 {Object.entries(selectedFacility).map(([key, value]) => {
                   if (key.startsWith('_')) return null; // Skip internal fields
                   
-                  const strValue = String(value ?? '');
+                  let strValue = String(value ?? '');
                   if (!strValue || strValue === 'undefined' || strValue === 'null') return null;
+
+                  // Format Excel date numbers to YYYY-MM-DD
+                  if (typeof value === 'number' && (key.includes('일자') || key.includes('일시') || key.includes('날짜') || key.includes('date'))) {
+                    // Excel date serial number to string
+                    const date = new Date(Math.round((value - 25569) * 86400 * 1000));
+                    if (!isNaN(date.getTime())) {
+                      const yyyy = date.getUTCFullYear();
+                      const mm = String(date.getUTCMonth() + 1).padStart(2, '0');
+                      const dd = String(date.getUTCDate()).padStart(2, '0');
+                      strValue = `${yyyy}-${mm}-${dd}`;
+                    }
+                  } else if (value instanceof Date) {
+                    const yyyy = value.getFullYear();
+                    const mm = String(value.getMonth() + 1).padStart(2, '0');
+                    const dd = String(value.getDate()).padStart(2, '0');
+                    strValue = `${yyyy}-${mm}-${dd}`;
+                  }
                   
                   const isUrl = strValue.startsWith('http://') || strValue.startsWith('https://');
                   
