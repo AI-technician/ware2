@@ -41,8 +41,12 @@ L.Icon.Default.mergeOptions({
 // Helper component to adjust map bounds
 function MapBounds({ markers, onFittingBounds }: { markers: [number, number][], onFittingBounds: (isFitting: boolean) => void }) {
   const map = useMap();
+  const prevMarkersRef = React.useRef<string>('');
+
   useEffect(() => {
-    if (markers.length > 0) {
+    const markersKey = JSON.stringify(markers);
+    if (markers.length > 0 && markersKey !== prevMarkersRef.current) {
+      prevMarkersRef.current = markersKey;
       onFittingBounds(true);
       const bounds = L.latLngBounds(markers);
       map.fitBounds(bounds, { padding: [50, 50], maxZoom: 14 });
@@ -663,10 +667,10 @@ export default function App() {
               
               <div className="overflow-auto flex-1 relative custom-scrollbar pr-2 flex flex-col rounded-xl">
                 {(isProcessingData || isFittingBounds) && (
-                  <div className="absolute inset-0 bg-slate-50/60 backdrop-blur-[2px] z-20 flex flex-col items-center justify-center rounded-xl transition-all duration-300">
-                    <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin shadow-lg"></div>
-                    <span className="mt-3 bg-white text-blue-600 text-xs font-bold px-3 py-1 rounded-full shadow-md border border-slate-200">
-                      {isProcessingData ? "데이터 처리 중..." : "지도 최적화 중..."}
+                  <div className="absolute bottom-4 right-6 z-30 flex items-center bg-white shadow-xl border border-slate-200 rounded-full px-4 py-2 transition-all duration-300 pointer-events-none">
+                    <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mr-3"></div>
+                    <span className="text-blue-600 text-xs font-bold">
+                      {isProcessingData ? "새로운 위치 데이터 분석 중..." : "지도 범위 최적화 중..."}
                     </span>
                   </div>
                 )}
