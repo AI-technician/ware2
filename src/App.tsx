@@ -1,3 +1,4 @@
+import precomputedCoords from './precomputedCoords.json';
 import React, { useState, useMemo, useCallback, useEffect } from 'react';
 import * as XLSX from 'xlsx';
 import { 
@@ -38,14 +39,31 @@ L.Icon.Default.mergeOptions({
 });
 
 // Helper component to adjust map bounds
-function MapBounds({ markers }: { markers: [number, number][] }) {
+function MapBounds({ markers, onFittingBounds }: { markers: [number, number][], onFittingBounds: (isFitting: boolean) => void }) {
   const map = useMap();
   useEffect(() => {
     if (markers.length > 0) {
+      onFittingBounds(true);
       const bounds = L.latLngBounds(markers);
       map.fitBounds(bounds, { padding: [50, 50], maxZoom: 14 });
+      
+      const onMoveEnd = () => {
+        onFittingBounds(false);
+        map.off('moveend', onMoveEnd);
+      };
+      map.on('moveend', onMoveEnd);
+      
+      const timer = setTimeout(() => {
+        onFittingBounds(false);
+        map.off('moveend', onMoveEnd);
+      }, 1500);
+
+      return () => {
+        map.off('moveend', onMoveEnd);
+        clearTimeout(timer);
+      };
     }
-  }, [markers, map]);
+  }, [markers, map, onFittingBounds]);
   return null;
 }
 
@@ -68,6 +86,8 @@ export default function App() {
   // Map View Mode
   const [viewMode, setViewMode] = useState<'list' | 'map'>('list');
   const [coordinates, setCoordinates] = useState<Record<number, [number, number]>>({});
+  const [isProcessingData, setIsProcessingData] = useState(false);
+  const [isFittingBounds, setIsFittingBounds] = useState(false);
   
   // Loading state for default file
   const [isInitializing, setIsInitializing] = useState(true);
@@ -83,12 +103,27 @@ export default function App() {
 
   const geocodeAddress = useCallback(async (address: string, id: number) => {
     try {
-      const cleanAddr = address.split(',')[0].trim(); // Take main part
+      const rawClean = address.split(',')[0].trim();
+      const cleanAddr = rawClean.replace(/\s\d+층.*/, '').replace(/\s지하.*/, '').replace(/\s(B\d|,|지하).*$/, '').trim();
+      
+      const precomputed = (precomputedCoords as any)[cleanAddr] || (precomputedCoords as any)[address];
+      if (precomputed) return precomputed as [number, number];
+      
       const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(cleanAddr)}`);
       if (res.ok) {
         const data = await res.json();
         if (data && data.length > 0) {
           return [parseFloat(data[0].lat), parseFloat(data[0].lon)] as [number, number];
+        } else {
+          // fallback to simple address
+          const simpler = cleanAddr.split(' ').slice(0, 3).join(' ');
+          const res2 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(simpler)}`);
+          if (res2.ok) {
+             const data2 = await res2.json();
+             if (data2 && data2.length > 0) {
+               return [parseFloat(data2[0].lat), parseFloat(data2[0].lon)] as [number, number];
+             }
+          }
         }
       }
     } catch (e) {
@@ -103,6 +138,7 @@ export default function App() {
     
     let isMounted = true;
     const loadCoords = async () => {
+      let isProcessing = false;
       const newCoords = { ...coordinates };
       for (let i = 0; i < data.length; i++) {
         if (!isMounted) break;
@@ -111,12 +147,28 @@ export default function App() {
         
         const address = data[i][locationCol] || '';
         if (address) {
-          const coord = await geocodeAddress(address, _id);
-          newCoords[_id] = coord;
-          setCoordinates(prev => ({ ...prev, [_id]: coord }));
-          // Wait 1 second to respect Nominatim API rate limits
-          await new Promise(resolve => setTimeout(resolve, 1000));
+          const rawClean = address.split(',')[0].trim();
+          const cleanAddr = rawClean.replace(/\s\d+층.*/, '').replace(/\s지하.*/, '').replace(/\s(B\d|,|지하).*$/, '').trim();
+          const precomputed = (precomputedCoords as any)[cleanAddr] || (precomputedCoords as any)[address];
+          
+          if (precomputed) {
+            newCoords[_id] = precomputed as [number, number];
+            setCoordinates(prev => ({ ...prev, [_id]: precomputed as [number, number] }));
+          } else {
+            if (!isProcessing) {
+              isProcessing = true;
+              setIsProcessingData(true);
+            }
+            const coord = await geocodeAddress(address, _id);
+            newCoords[_id] = coord;
+            setCoordinates(prev => ({ ...prev, [_id]: coord }));
+            // Wait 1 second to respect Nominatim API rate limits
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
         }
+      }
+      if (isMounted && isProcessing) {
+        setIsProcessingData(false);
       }
     };
     loadCoords();
@@ -150,19 +202,19 @@ export default function App() {
   useEffect(() => {
     setIsInitializing(true);
     setInitError(null);
-    const fileUrl = '/logistics.xlsx';
+    const fileUrl = '/logistics.csv';
     fetch(fileUrl)
       .then(response => {
         if (!response.ok) throw new Error('File not found: ' + response.statusText);
-        return response.arrayBuffer();
+        return response.text();
       })
-      .then(ab => {
-        const wb = XLSX.read(new Uint8Array(ab), { type: 'array' });
+      .then(text => {
+        const wb = XLSX.read(text, { type: 'string' });
         loadDataFromWorkbook(wb);
         setIsInitializing(false);
       })
       .catch(error => {
-        console.error("Failed to load default logistics.xlsx", error);
+        console.error("Failed to load default logistics.csv", error);
         setInitError(error instanceof Error ? error.message : String(error));
         setIsInitializing(false);
       });
@@ -295,32 +347,32 @@ export default function App() {
   if (data.length === 0) {
     if (isInitializing) {
       return (
-        <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col items-center justify-center p-6 font-sans">
+        <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col items-center justify-center p-6 font-sans">
           <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
-          <p className="text-lg font-semibold text-slate-300">데이터를 불러오는 중입니다...</p>
+          <p className="text-lg font-semibold text-slate-700">데이터를 불러오는 중입니다...</p>
         </div>
       );
     }
 
     return (
-      <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col items-center justify-center p-6 font-sans">
-        <div className="max-w-2xl w-full bg-slate-800/50 border border-slate-700 rounded-3xl shadow-xl overflow-hidden">
-          <div className="border-b border-slate-700 p-8 text-center">
+      <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col items-center justify-center p-6 font-sans">
+        <div className="max-w-2xl w-full bg-white shadow-sm border border-slate-200 rounded-3xl shadow-xl overflow-hidden">
+          <div className="border-b border-slate-200 p-8 text-center">
             {initError && (
               <div className="mb-4 bg-red-400/10 border border-red-400/20 text-red-400 px-4 py-2 rounded-lg text-sm font-semibold max-w-md mx-auto">
                 기본 데이터 로드 실패: {initError}
               </div>
             )}
-            <Building2 className="w-16 h-16 mx-auto mb-4 text-blue-400 opacity-80" />
+            <Building2 className="w-16 h-16 mx-auto mb-4 text-blue-600 opacity-80" />
             <h1 className="text-3xl font-bold tracking-tight">남양주시 물류창고 대시보드</h1>
-            <p className="mt-2 text-slate-400 font-medium">관리하시는 엑셀 파일을 업로드하여 데이터를 시각화하세요</p>
+            <p className="mt-2 text-slate-500 font-medium">관리하시는 엑셀 파일을 업로드하여 데이터를 시각화하세요</p>
           </div>
           
           <div className="p-8">
             <div 
               onDragOver={(e) => e.preventDefault()}
               onDrop={handleDrop}
-              className="border border-dashed border-slate-600 rounded-2xl p-12 text-center hover:bg-slate-800 transition-colors cursor-pointer relative group"
+              className="border border-dashed border-slate-300 rounded-2xl p-12 text-center hover:bg-white transition-colors cursor-pointer relative group"
             >
               <input 
                 type="file" 
@@ -328,20 +380,20 @@ export default function App() {
                 onChange={handleFileUpload} 
                 className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
               />
-              <UploadCloud className="w-12 h-12 text-blue-400 mx-auto mb-4 group-hover:scale-110 transition-transform" />
-              <p className="text-lg font-semibold text-slate-200">여기로 파일을 드래그하거나 클릭하여 업로드</p>
+              <UploadCloud className="w-12 h-12 text-blue-600 mx-auto mb-4 group-hover:scale-110 transition-transform" />
+              <p className="text-lg font-semibold text-slate-800">여기로 파일을 드래그하거나 클릭하여 업로드</p>
               <p className="text-sm text-slate-500 mt-2">지원 형식: .xlsx, .xls, .csv</p>
             </div>
             
-            <div className="mt-8 bg-slate-800/80 rounded-xl p-5 border border-slate-700">
-              <h3 className="text-sm font-bold text-slate-300 flex items-center mb-2">
+            <div className="mt-8 bg-white shadow-sm rounded-xl p-5 border border-slate-200">
+              <h3 className="text-sm font-bold text-slate-700 flex items-center mb-2">
                 <FileSpreadsheet className="w-4 h-4 mr-2" /> 
                 권장되는 데이터 구조
               </h3>
-              <p className="text-sm text-slate-400 leading-relaxed">
-                파일에 <span className="font-semibold px-1.5 py-0.5 rounded bg-slate-700 text-slate-200 border border-slate-600">상호명</span>, 
-                <span className="font-semibold px-1.5 py-0.5 rounded bg-slate-700 text-slate-200 border border-slate-600 ml-1">소재지(주소)</span>, 
-                <span className="font-semibold px-1.5 py-0.5 rounded bg-slate-700 text-slate-200 border border-slate-600 ml-1">면적</span>
+              <p className="text-sm text-slate-500 leading-relaxed">
+                파일에 <span className="font-semibold px-1.5 py-0.5 rounded bg-slate-100 text-slate-800 border border-slate-300">상호명</span>, 
+                <span className="font-semibold px-1.5 py-0.5 rounded bg-slate-100 text-slate-800 border border-slate-300 ml-1">소재지(주소)</span>, 
+                <span className="font-semibold px-1.5 py-0.5 rounded bg-slate-100 text-slate-800 border border-slate-300 ml-1">면적</span>
                 과 관련된 의미의 열 이름이 포함되어 있으면 대시보드가 자동으로 인식합니다. (예: "창고명", "읍면동", "연면적" 등 동일)
               </p>
             </div>
@@ -352,27 +404,27 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col font-sans overflow-hidden">
+    <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col font-sans overflow-hidden">
       {/* Header */}
       <header className="px-6 py-5 flex items-center justify-between z-20 shrink-0">
         <div className="flex items-center space-x-3">
-          <div className="w-10 h-10 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center text-blue-400">
-            <Building2 className="w-5 h-5 text-blue-400" />
+          <div className="w-10 h-10 rounded-full bg-white border border-slate-200 flex items-center justify-center text-blue-600">
+            <Building2 className="w-5 h-5 text-blue-600" />
           </div>
           <div>
-            <h1 className="text-2xl font-bold tracking-tight">NYJ WAREHOUSE <span className="text-blue-400">STATUS</span></h1>
-            <p className="text-slate-400 text-xs">남양주시 물류창고 대시보드</p>
+            <h1 className="text-2xl font-bold tracking-tight">NYJ WAREHOUSE <span className="text-blue-600">STATUS</span></h1>
+            <p className="text-slate-500 text-xs">남양주시 물류창고 대시보드</p>
           </div>
         </div>
         
         <div className="flex flex-col md:flex-row md:items-center space-y-2 md:space-y-0 md:space-x-6">
            <div className="text-right hidden md:block">
               <p className="text-[10px] text-slate-500 uppercase font-semibold">총 로드된 데이터</p>
-              <p className="text-sm font-mono text-emerald-400">{processedData.length.toLocaleString()} 건</p>
+              <p className="text-sm font-mono text-emerald-600">{processedData.length.toLocaleString()} 건</p>
            </div>
            <button 
               onClick={resetData}
-              className="flex items-center text-xs px-4 py-2 text-slate-300 bg-slate-800 border border-slate-700 hover:bg-slate-700 hover:text-white rounded-full font-bold transition-all"
+              className="flex items-center text-xs px-4 py-2 text-slate-700 bg-white border border-slate-200 hover:bg-slate-100 hover:text-slate-900 rounded-full font-bold transition-all"
            >
               <Trash2 className="w-3.5 h-3.5 mr-1.5" />
               새로운 파일 로드
@@ -384,7 +436,7 @@ export default function App() {
         
         {/* Sidebar Filters */}
         <aside className="w-full lg:w-[320px] flex-shrink-0 flex flex-col gap-4 overflow-y-auto custom-scrollbar pr-2">
-          <div className="bg-slate-800/50 border border-slate-700 rounded-3xl p-6 shrink-0">
+          <div className="bg-white shadow-sm border border-slate-200 rounded-3xl p-6 shrink-0">
             <div className="flex items-center mb-4">
               <Search className="w-4 h-4 text-slate-500 mr-2" />
               <h2 className="text-sm font-bold uppercase text-slate-500 tracking-wider">검색</h2>
@@ -394,11 +446,11 @@ export default function App() {
               placeholder="상호 또는 주소 검색..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full px-4 py-2.5 bg-slate-900 border border-slate-700 rounded-xl text-sm focus:outline-none focus:border-slate-500 text-slate-200 placeholder-slate-600 transition-colors"
+              className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-slate-500 text-slate-800 placeholder-slate-600 transition-colors"
             />
           </div>
 
-          <div className="bg-slate-800/50 border border-slate-700 rounded-3xl p-6 flex-1 min-h-0 flex flex-col">
+          <div className="bg-white shadow-sm border border-slate-200 rounded-3xl p-6 flex-1 min-h-0 flex flex-col">
             <div className="flex flex-col mb-4 shrink-0">
               <div className="flex items-center justify-between mb-1">
                 <div className="flex items-center">
@@ -408,7 +460,7 @@ export default function App() {
                 {selectedRegions.size > 0 && (
                   <button 
                     onClick={() => setSelectedRegions(new Set())}
-                    className="text-[10px] uppercase font-bold text-blue-400 hover:text-blue-300 bg-blue-500/10 px-2 py-0.5 rounded-full"
+                    className="text-[10px] uppercase font-bold text-blue-600 hover:text-blue-700 bg-blue-50 px-2 py-0.5 rounded-full"
                   >
                     초기화
                   </button>
@@ -418,64 +470,64 @@ export default function App() {
             </div>
             <div className="overflow-y-auto pr-2 space-y-1 custom-scrollbar flex-1">
               {allRegions.map(region => (
-                <label key={region} className="flex items-center group cursor-pointer p-1.5 -mx-1.5 rounded-lg hover:bg-slate-700/50 transition-colors">
+                <label key={region} className="flex items-center group cursor-pointer p-1.5 -mx-1.5 rounded-lg hover:bg-slate-100 transition-colors">
                   <input 
                     type="checkbox" 
                     checked={selectedRegions.has(region)}
                     onChange={() => toggleRegion(region)}
-                    className="rounded border-slate-600 bg-slate-800 text-blue-500 focus:ring-blue-500 focus:ring-offset-slate-900 mr-3 w-4 h-4"
+                    className="rounded border-slate-300 bg-white text-blue-500 focus:ring-blue-500 focus:ring-offset-slate-900 mr-3 w-4 h-4"
                   />
-                  <span className={`text-sm ${selectedRegions.has(region) ? 'text-white font-medium' : 'text-slate-400 group-hover:text-slate-200'}`}>{region}</span>
+                  <span className={`text-sm ${selectedRegions.has(region) ? 'text-slate-900 font-medium' : 'text-slate-500 group-hover:text-slate-800'}`}>{region}</span>
                 </label>
               ))}
             </div>
           </div>
           
-          <div className="bg-slate-800/50 border border-slate-700 rounded-3xl p-6 shrink-0">
+          <div className="bg-white shadow-sm border border-slate-200 rounded-3xl p-6 shrink-0">
             <h2 className="text-sm font-bold uppercase text-slate-500 tracking-wider mb-4">데이터 자동 매핑</h2>
-            <div className="space-y-3 text-sm text-slate-400">
-              <div className="flex justify-between items-center border-b border-slate-700/50 pb-2">
+            <div className="space-y-3 text-sm text-slate-500">
+              <div className="flex justify-between items-center border-b border-slate-200 pb-2">
                 <span className="font-medium text-xs uppercase">지역구분</span>
                 <select 
                    value={regionCol} 
                    onChange={e => setRegionCol(e.target.value)} 
-                   className="bg-slate-900 border border-slate-700 rounded-md px-2 py-1 font-semibold focus:outline-none max-w-[140px] truncate text-slate-300 text-xs"
+                   className="bg-slate-50 border border-slate-200 rounded-md px-2 py-1 font-semibold focus:outline-none max-w-[140px] truncate text-slate-700 text-xs"
                    title={regionCol}
                 >
                   <option value="">-- 자동생성 --</option>
                   {columns.map(c => <option key={c} value={c}>{c}</option>)}
                 </select>
               </div>
-              <div className="flex justify-between items-center border-b border-slate-700/50 pb-2">
+              <div className="flex justify-between items-center border-b border-slate-200 pb-2">
                 <span className="font-medium text-xs uppercase">상호</span>
                 <select 
                    value={nameCol} 
                    onChange={e => setNameCol(e.target.value)} 
-                   className="bg-slate-900 border border-slate-700 rounded-md px-2 py-1 font-semibold focus:outline-none max-w-[140px] truncate text-slate-300 text-xs"
+                   className="bg-slate-50 border border-slate-200 rounded-md px-2 py-1 font-semibold focus:outline-none max-w-[140px] truncate text-slate-700 text-xs"
                    title={nameCol}
                 >
                   <option value="">-- 선택 --</option>
                   {columns.map(c => <option key={c} value={c}>{c}</option>)}
                 </select>
               </div>
-              <div className="flex justify-between items-center border-b border-slate-700/50 pb-2">
+              <div className="flex justify-between items-center border-b border-slate-200 pb-2">
                 <span className="font-medium text-xs uppercase">주소</span>
                 <select 
                    value={locationCol} 
                    onChange={e => setLocationCol(e.target.value)} 
-                   className="bg-slate-900 border border-slate-700 rounded-md px-2 py-1 font-semibold focus:outline-none max-w-[140px] truncate text-slate-300 text-xs"
+                   className="bg-slate-50 border border-slate-200 rounded-md px-2 py-1 font-semibold focus:outline-none max-w-[140px] truncate text-slate-700 text-xs"
                    title={locationCol}
                 >
                   <option value="">-- 선택 --</option>
                   {columns.map(c => <option key={c} value={c}>{c}</option>)}
                 </select>
               </div>
-              <div className="flex justify-between items-center border-b border-slate-700/50 pb-2">
+              <div className="flex justify-between items-center border-b border-slate-200 pb-2">
                 <span className="font-medium text-xs uppercase">면적</span>
                 <select 
                    value={areaCol} 
                    onChange={e => setAreaCol(e.target.value)} 
-                   className="bg-slate-900 border border-slate-700 rounded-md px-2 py-1 font-semibold focus:outline-none max-w-[140px] truncate text-slate-300 text-xs"
+                   className="bg-slate-50 border border-slate-200 rounded-md px-2 py-1 font-semibold focus:outline-none max-w-[140px] truncate text-slate-700 text-xs"
                    title={areaCol}
                 >
                   <option value="">-- 선택 --</option>
@@ -487,7 +539,7 @@ export default function App() {
                 <select 
                    value={urlCol} 
                    onChange={e => setUrlCol(e.target.value)} 
-                   className="bg-slate-900 border border-slate-700 rounded-md px-2 py-1 font-semibold focus:outline-none max-w-[140px] truncate text-slate-300 text-xs"
+                   className="bg-slate-50 border border-slate-200 rounded-md px-2 py-1 font-semibold focus:outline-none max-w-[140px] truncate text-slate-700 text-xs"
                    title={urlCol}
                 >
                   <option value="">-- 자동 --</option>
@@ -503,19 +555,19 @@ export default function App() {
           
           {/* Summary Cards */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 shrink-0">
-            <div className="bg-slate-800/50 border border-slate-700 rounded-3xl p-6 flex flex-col justify-between">
+            <div className="bg-white shadow-sm border border-slate-200 rounded-3xl p-6 flex flex-col justify-between">
               <div className="text-slate-500 text-xs font-bold uppercase tracking-wider mb-2">필터링된 창고 수</div>
               <div>
-                <div className="text-3xl lg:text-4xl font-bold text-white tracking-tight">
+                <div className="text-3xl lg:text-4xl font-bold text-slate-900 tracking-tight">
                   {totalFacilities.toLocaleString()} <span className="text-sm text-slate-500 font-normal ml-1">개소</span>
                 </div>
               </div>
             </div>
             
-            <div className="bg-slate-800/50 border border-slate-700 rounded-3xl p-6 flex flex-col justify-between">
+            <div className="bg-white shadow-sm border border-slate-200 rounded-3xl p-6 flex flex-col justify-between">
               <div className="text-slate-500 text-xs font-bold uppercase tracking-wider mb-2">총 면적 합계</div>
               <div>
-                <div className="text-3xl lg:text-4xl font-bold text-white tracking-tight">
+                <div className="text-3xl lg:text-4xl font-bold text-slate-900 tracking-tight">
                    {totalArea >= 1000000 
                      ? (totalArea / 1000000).toLocaleString(undefined, {maximumFractionDigits: 2}) + 'M'
                      : totalArea >= 1000 
@@ -524,16 +576,16 @@ export default function App() {
                    }
                    <span className="text-sm text-slate-500 font-normal ml-1">㎡</span>
                 </div>
-                <div className="w-full bg-slate-700 h-1.5 rounded-full mt-3 overflow-hidden">
+                <div className="w-full bg-slate-100 h-1.5 rounded-full mt-3 overflow-hidden">
                   <div className="bg-blue-500 h-full w-[80%]"></div>
                 </div>
               </div>
             </div>
 
-            <div className="bg-slate-800/50 border border-slate-700 rounded-3xl p-6 flex flex-col justify-between">
+            <div className="bg-white shadow-sm border border-slate-200 rounded-3xl p-6 flex flex-col justify-between">
                <div className="text-slate-500 text-xs font-bold uppercase tracking-wider mb-2">해당 지역 수</div>
               <div>
-                <div className="text-3xl lg:text-4xl font-bold text-white tracking-tight">
+                <div className="text-3xl lg:text-4xl font-bold text-slate-900 tracking-tight">
                    {new Set(filteredData.map(d => d._region)).size} <span className="text-sm text-slate-500 font-normal ml-1">지역</span>
                 </div>
               </div>
@@ -543,7 +595,7 @@ export default function App() {
           {/* Chart and Table Row */}
           <div className="flex-1 grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-5 gap-4 min-h-0">
             {/* Rank List Section */}
-            <div className="xl:col-span-2 bg-slate-800/50 border border-slate-700 rounded-3xl p-6 flex flex-col min-h-0">
+            <div className="xl:col-span-2 bg-white shadow-sm border border-slate-200 rounded-3xl p-6 flex flex-col min-h-0">
               <div className="flex items-center space-x-2 mb-4 shrink-0">
                 <MapPin className="w-4 h-4 text-slate-500" />
                 <h3 className="text-sm font-bold uppercase text-slate-500 tracking-wider">지역별 창고 수 (상위 10개)</h3>
@@ -554,17 +606,17 @@ export default function App() {
                     {regionStats.slice(0, 10).map((entry, index) => (
                       <div 
                         key={index} 
-                        className={`flex justify-between items-center p-3 rounded-xl border transition-colors cursor-pointer ${selectedRegions.has(entry.name) ? 'bg-blue-500/20 border-blue-500/50' : 'bg-slate-700/20 border-slate-700/50 hover:bg-slate-700/40'}`}
+                        className={`flex justify-between items-center p-3 rounded-xl border transition-colors cursor-pointer ${selectedRegions.has(entry.name) ? 'bg-blue-50 border-blue-200' : 'bg-slate-50 border-slate-200 hover:bg-slate-100'}`}
                         onClick={() => toggleRegion(entry.name)}
                       >
                         <div className="flex items-center space-x-3">
-                          <span className={`flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold ${selectedRegions.has(entry.name) ? 'bg-blue-500 text-white' : 'bg-slate-800 border-slate-600 border text-slate-400'}`}>
+                          <span className={`flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold ${selectedRegions.has(entry.name) ? 'bg-blue-600 text-white' : 'bg-white border-slate-300 border text-slate-500'}`}>
                             {index + 1}
                           </span>
-                          <span className={`text-sm font-medium ${selectedRegions.has(entry.name) ? 'text-white' : 'text-slate-200'}`}>{entry.name}</span>
+                          <span className={`text-sm font-medium ${selectedRegions.has(entry.name) ? 'text-slate-900' : 'text-slate-800'}`}>{entry.name}</span>
                         </div>
                         <div className="text-right">
-                          <div className={`font-mono font-bold text-lg ${selectedRegions.has(entry.name) ? 'text-blue-300' : 'text-blue-400'}`}>
+                          <div className={`font-mono font-bold text-lg ${selectedRegions.has(entry.name) ? 'text-blue-700' : 'text-blue-600'}`}>
                              {entry.count.toLocaleString()}
                              <span className="text-xs text-slate-500 font-sans ml-1">개소</span>
                           </div>
@@ -582,42 +634,50 @@ export default function App() {
             </div>
 
             {/* Data Table / Map */}
-            <div className="xl:col-span-3 bg-slate-800/50 border border-slate-700 rounded-3xl p-6 overflow-hidden flex flex-col min-h-0">
+            <div className="xl:col-span-3 bg-white shadow-sm border border-slate-200 rounded-3xl p-6 overflow-hidden flex flex-col min-h-0">
               <div className="flex justify-between items-center mb-4 shrink-0 flex-wrap gap-2">
                 <div className="flex items-center space-x-2">
                   <TableProperties className="w-4 h-4 text-slate-500" />
                   <h3 className="text-sm font-bold uppercase text-slate-500 tracking-wider">상세 현황</h3>
                 </div>
                 <div className="flex items-center space-x-2">
-                  <div className="flex bg-slate-900 rounded-lg p-1 border border-slate-700">
+                  <div className="flex bg-slate-50 rounded-lg p-1 border border-slate-200">
                     <button 
                       onClick={() => setViewMode('list')}
-                      className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors flex items-center space-x-1.5 ${viewMode === 'list' ? 'bg-slate-700 text-white shadow-sm' : 'text-slate-400 hover:text-slate-300'}`}
+                      className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors flex items-center space-x-1.5 ${viewMode === 'list' ? 'bg-slate-100 text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
                     >
                       <List className="w-3.5 h-3.5" />
                       <span>목록</span>
                     </button>
                     <button 
                       onClick={() => setViewMode('map')}
-                      className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors flex items-center space-x-1.5 ${viewMode === 'map' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-300'}`}
+                      className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors flex items-center space-x-1.5 ${viewMode === 'map' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
                     >
                       <MapIcon className="w-3.5 h-3.5" />
                       <span>지도</span>
                     </button>
                   </div>
-                  <span className="px-3 py-1.5 bg-slate-700 rounded text-[10px] font-bold tracking-widest text-emerald-400 border border-slate-600/50 shadow-inner uppercase">LIVE DATA</span>
+                  <span className="px-3 py-1.5 bg-slate-100 rounded text-[10px] font-bold tracking-widest text-emerald-600 border border-slate-200 shadow-inner uppercase">LIVE DATA</span>
                 </div>
               </div>
               
               <div className="overflow-auto flex-1 relative custom-scrollbar pr-2 flex flex-col rounded-xl">
+                {(isProcessingData || isFittingBounds) && (
+                  <div className="absolute inset-0 bg-slate-50/60 backdrop-blur-[2px] z-20 flex flex-col items-center justify-center rounded-xl transition-all duration-300">
+                    <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin shadow-lg"></div>
+                    <span className="mt-3 bg-white text-blue-600 text-xs font-bold px-3 py-1 rounded-full shadow-md border border-slate-200">
+                      {isProcessingData ? "데이터 처리 중..." : "지도 최적화 중..."}
+                    </span>
+                  </div>
+                )}
                 {viewMode === 'map' ? (
-                  <div className="w-full h-full min-h-[400px] bg-slate-900 rounded-xl overflow-hidden border border-slate-700 z-10">
+                  <div className="w-full h-full min-h-[400px] bg-slate-50 rounded-xl overflow-hidden border border-slate-200 z-10 relative">
                     <MapContainer center={[37.6366, 127.2165]} zoom={11} style={{ height: '100%', width: '100%' }}>
                       <TileLayer
                         attribution='&amp;copy <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
                         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
                       />
-                      <MapBounds markers={filteredData.filter(d => coordinates[d._id]).map(d => coordinates[d._id])} />
+                      <MapBounds markers={filteredData.filter(d => coordinates[d._id]).map(d => coordinates[d._id])} onFittingBounds={setIsFittingBounds} />
                       {filteredData.map(row => {
                         const coord = coordinates[row._id];
                         if (!coord) return null;
@@ -649,7 +709,7 @@ export default function App() {
                   </div>
                 ) : (
                   <table className="w-full text-left border-collapse min-w-max">
-                    <thead className="text-xs text-slate-500 border-b border-slate-700 uppercase sticky top-0 z-10 bg-slate-800/90 backdrop-blur">
+                    <thead className="text-xs text-slate-500 border-b border-slate-200 uppercase sticky top-0 z-10 bg-white/90 backdrop-blur">
                       <tr>
                         <th className="pb-3 px-4 font-semibold whitespace-nowrap">상호</th>
                         <th className="pb-3 px-4 font-semibold whitespace-nowrap">지역</th>
@@ -657,13 +717,13 @@ export default function App() {
                         <th className="pb-3 px-4 font-semibold text-right whitespace-nowrap">면적 (㎡)</th>
                       </tr>
                     </thead>
-                    <tbody className="text-sm divide-y divide-slate-700/50">
+                    <tbody className="text-sm divide-y divide-slate-200">
                       {filteredData.length > 0 ? (
                         filteredData.map((row) => (
-                          <tr key={row._id} onClick={() => setSelectedFacility(row)} className="hover:bg-slate-700/30 transition-colors group cursor-pointer">
-                            <td className="py-3 px-4 font-medium text-slate-200">
+                          <tr key={row._id} onClick={() => setSelectedFacility(row)} className="hover:bg-slate-50 transition-colors group cursor-pointer">
+                            <td className="py-3 px-4 font-medium text-slate-800">
                                {row._url ? (
-                                 <a href={row._url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} className="hover:text-blue-400 hover:underline transition-colors cursor-pointer">
+                                 <a href={row._url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} className="hover:text-blue-600 hover:underline transition-colors cursor-pointer">
                                    {row._name}
                                  </a>
                                ) : (
@@ -671,14 +731,14 @@ export default function App() {
                                )}
                             </td>
                             <td className="py-3 px-4">
-                              <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-slate-700/80 text-[11px] font-bold text-slate-300 border border-slate-600">
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-slate-100 text-[11px] font-bold text-slate-700 border border-slate-300">
                                 {row._region}
                               </span>
                             </td>
-                            <td className="py-3 px-4 text-slate-400 text-xs max-w-[200px] truncate group-hover:text-slate-300 transition-colors" title={row._rawLocation}>
+                            <td className="py-3 px-4 text-slate-500 text-xs max-w-[200px] truncate group-hover:text-slate-700 transition-colors" title={row._rawLocation}>
                               {row._rawLocation}
                             </td>
-                            <td className="py-3 px-4 text-slate-300 font-mono text-right tabular-nums">
+                            <td className="py-3 px-4 text-slate-700 font-mono text-right tabular-nums">
                               {row._area ? row._area.toLocaleString(undefined, {maximumFractionDigits: 1}) : '-'}
                             </td>
                           </tr>
@@ -701,22 +761,22 @@ export default function App() {
 
       {/* Modal */}
       {selectedFacility && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setSelectedFacility(null)}>
-          <div className="bg-slate-900 border border-slate-700 rounded-3xl w-full max-w-2xl max-h-[90vh] flex flex-col shadow-2xl relative overflow-hidden" onClick={e => e.stopPropagation()}>
-            <div className="p-6 border-b border-slate-700/80 flex justify-between items-center bg-slate-800/50 shrink-0">
-              <h2 className="text-xl font-bold text-white tracking-tight flex items-center gap-2">
-                <Building2 className="w-5 h-5 text-blue-400" />
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setSelectedFacility(null)}>
+          <div className="bg-slate-50 border border-slate-200 rounded-3xl w-full max-w-2xl max-h-[90vh] flex flex-col shadow-2xl relative overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="p-6 border-b border-slate-200 flex justify-between items-center bg-white shadow-sm shrink-0">
+              <h2 className="text-xl font-bold text-slate-900 tracking-tight flex items-center gap-2">
+                <Building2 className="w-5 h-5 text-blue-600" />
                 {selectedFacility._name}
               </h2>
               <button 
                 onClick={() => setSelectedFacility(null)}
-                className="text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-full p-2 transition-colors"
+                className="text-slate-500 hover:text-slate-900 bg-white hover:bg-slate-100 border border-slate-200 rounded-full p-2 transition-colors"
                 title="Close"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <div className="p-6 overflow-y-auto custom-scrollbar flex-1 bg-slate-900/50">
+            <div className="p-6 overflow-y-auto custom-scrollbar flex-1 bg-slate-50/50">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 {Object.entries(selectedFacility).map(([key, value]) => {
                   if (key.startsWith('_')) return null; // Skip internal fields
@@ -744,14 +804,14 @@ export default function App() {
                   const isUrl = strValue.startsWith('http://') || strValue.startsWith('https://');
                   
                   return (
-                    <div key={key} className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-4 flex flex-col gap-1.5">
+                    <div key={key} className="bg-white shadow-sm border border-slate-200 rounded-xl p-4 flex flex-col gap-1.5">
                       <span className="text-[10px] uppercase tracking-wider font-bold text-slate-500">{key}</span>
                       {isUrl ? (
-                        <a href={strValue} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 hover:underline text-sm font-medium truncate" title={strValue}>
+                        <a href={strValue} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-700 hover:underline text-sm font-medium truncate" title={strValue}>
                           {strValue}
                         </a>
                       ) : (
-                        <span className="text-sm text-slate-200 font-medium break-words">{strValue}</span>
+                        <span className="text-sm text-slate-800 font-medium break-words">{strValue}</span>
                       )}
                     </div>
                   );
